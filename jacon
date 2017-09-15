@@ -1,0 +1,80 @@
+#!/bin/sh
+
+_readlink() {
+    [ ! -h "$1" ] && echo "$1" || (local link="$(expr "$(command ls -ld -- "$1")" : '.*-> \(.*\)$')"
+    cd $(dirname $1)
+    myreadlink "$link" | sed "s|^\([^/].*\)\$|$(dirname $1)/\1|")
+}
+
+# "imports"
+this=$(dirname $(_readlink $0))
+. "$this/libs/arrays"
+
+phelp() {
+    cat << EOF
+usage: $0 [OPTIONS]
+
+    -h            Show this message
+    -c CONFIG     Use CONFIG as config file
+    -m MIN        Minimum time till next jack event for recon
+EOF
+}
+
+config_file="$this/config"
+min_ev_time=2
+while getopts ':hc:m:' arg; do
+    case "$arg" in
+        h) phelp; exit 0 ;;
+        c) config_file="$OPTARG" ;;
+        m) min_ev_time="$OPTARG"
+    esac
+done
+
+
+do_cons() {
+    conf=$(cat "$config_file" | sh "$this/libs/json" -e | sed -e 's/$.\(.*\)\[.*]/\1/')
+
+    echo "$conf" | while read -r line; do
+        a=$(echo "$line" | cut -f1 -d' ' | sh "$this/libs/unesc")
+        b=$(echo "$line" | cut -f2- -d' ' | sh "$this/libs/unesc")
+
+        echo "connecting '$a' and '$b'..."
+        jack_connect "$a" "$b" &
+    done
+    wait
+}
+
+recon_loop() {
+    do_cons
+    last_time=$(date +'%s')
+    jack_evmon | while read line; do
+        if [ $(expr \( "$last_time" + "$min_ev_time" \) \< "$(date +'%s')") = 1 ]; then
+            do_cons
+            last_time=$(date +'%s')
+        else
+            echo "SKIP"
+        fi
+    done
+}
+
+test_function() {
+    read tmp; echo "$tmp"
+}
+server_loop() {
+    cb() {
+        while read line; do
+            echo "$line!"
+        done
+    }
+    # socat tcp-l:25508,reuseaddr,fork exec:"$this/interactive"
+    npipe_loc="/tmp/jacon_backpipe0"
+    rm -f "$npipe_loc"
+    mkfifo "$npipe_loc"
+    socat tcp-l:25508,reuseaddr,fork - <"$npipe_loc" | cb >"$npipe_loc"
+    echo "done!"
+}
+
+recon_loop &
+server_loop &
+
+wait
